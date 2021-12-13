@@ -140,7 +140,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp" />
+    <ClCompile Include="ConnectionManager.cpp" />
+    <ClCompile Include="demo1.cpp" />
+    <ClCompile Include="demo2.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ConnectionManager.h" />
