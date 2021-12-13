@@ -30,7 +30,7 @@ int client()
 		{
             connectionManager.waitForIncomingMessageFromSocket();
             NetworkMessage m;
-            connectionManager.popIncomingMessage(m);
+            //connectionManager.popIncomingMessage(m);
             //assert(m[m.size() - 2] == 0);
             //assert(m[m.size() - 1] == 1);
 		}
