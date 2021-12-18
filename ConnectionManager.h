@@ -1,3 +1,5 @@
+#pragma once
+
 #include <atomic>
 #include <iostream>
 #include <string>
@@ -9,87 +11,80 @@
 #include <cassert>
 
 #include "include/asio.hpp"
-using asio::ip::tcp;
-
-namespace NetworkMessages {
-	// represent the data we want to send accross the socket
-	typedef std::vector<uint8_t> Payload;
-}
 
 
-// Helper class to read a NetworkMessage from socket.
-// The difficulty lies in the fact that reading from socket may retrieve an incomplete NetworkMessage,
-// or several NeworkMessages who last message is incomplete.
-class SocketReader
+class PayloadQueue
 {
 
 public:
-	SocketReader(tcp::socket& socket);
+	PayloadQueue(std::string name,
+		asio::io_context& io_context);
 
-	// Blocks until one full Payload is read, or the connection is reset
-	NetworkMessages::Payload ReadNextNetworkPayload();
+	// tries once to get a payload if one is available
+	bool getPayloadIfAny(std::vector<uint8_t>& payload);
+
+	// tries to get a payload by blocking, otherwise abort after the timeout is elapsed
+	bool getNextPayload(std::vector<uint8_t>& payload, int timeoutMilliseconds);
+
+	void addPayload(std::vector<uint8_t>&& payload);
 
 private:
-	tcp::socket& _socket;
 
-	std::vector<uint8_t> _socketBuffer; // buffer of data extracted from socket
-	size_t _bytesAvailableInBuffer = 0; // number of bytes in the buffer that actually contain socket data
-	size_t _bufferCurrentPos; // where to read when we continue reading the buffer
+	void tryGetPayload(std::atomic<int>& signal, std::vector<uint8_t>& payload, std::chrono::steady_clock::time_point expirationTime);
 
-	bool _shouldReadFromSocket; // should the next read be from the socket or from the buffer
-
-	static const int _bufferSize = 1000; // max size of the buffer to read data from socket
-	static_assert(_bufferSize > 6, "BufferSize > 6");
+	std::string _name;
+	asio::io_context& _io_context;
+	asio::io_service::strand _queueStrand;
+	std::deque< std::vector<uint8_t> > _queue;
 };
 
-// Manages a connection to an endpoint, and allows read / write of Network Messages in queues
-class ConnectionManager
+
+
+class NetworkConnection
 {
-
 public:
-	ConnectionManager(const std::string& name);
 
-	std::string getName() const;
+	NetworkConnection(
+		const std::string& name,
+		asio::io_context& io_context_for_socket,
+		asio::io_context& io_context_for_payload_queue);
 
-	bool connectToServer(const std::string& ip, const std::string& port);
-	bool waitForClient(const int port); // blocks until a client joins in
-	bool isConnected() const;
+	NetworkConnection(const NetworkConnection&) = delete;
+	NetworkConnection& operator=(const NetworkConnection&) = delete;
 
-	bool writeAllAndStop();
-	bool isStopped() const;
+	bool connectSync(const asio::ip::tcp::endpoint endpoint);
 
-	bool popIncomingPayload(NetworkMessages::Payload& message);
-	bool waitForIncomingMessageFromSocket();
+	bool acceptConnectionSync(const int port);
 
-	void pushOutgoingPayload(const NetworkMessages::Payload& payload);
-	bool writeOutgoingMessageToSocket();
+	void close();
+
+	// asynchronously sends a payload to the endpoint. This is thread-safe.
+	bool write(std::vector<uint8_t>&& payload);
+
+	// block and get next payload if there is one ready
+	bool getPayloadIfAny(std::vector<uint8_t>& payload);
+
+	// block and get next payload, or aborts if we exceed the timeout
+	bool getNextPayload(std::vector<uint8_t>& payload, int timeoutMilliseconds = 10);
 
 private:
-	// represent raw low-level data sent accross sockets, including header and footer
-	typedef std::vector<uint8_t> NetworkMessage;
+	void do_read_header();
+	void do_read_body(const int payloadSize);
+	void do_write();
 
-	// for debug only
 	const std::string _name;
 
-	asio::io_context _io_context;
-
-	// the socket for this connection
-	tcp::socket _socket;
-	std::recursive_mutex _socketLock;
-
-	// queue of incoming payloads that were received from socket
-	std::deque<NetworkMessages::Payload> _incomingPayloadsToRead;
-	mutable std::recursive_mutex _incomingPayloadsToReadLock;
-
-	// queue of outgoing messages that were not sent to socket yet
-	std::deque<NetworkMessage> _outgoingMessagesToWrite;
-	std::recursive_mutex _outgoingMessagesToWriteLock;
-
-	// Helper class to read data from socket
-	SocketReader _socketReader;
+	asio::io_context& _ioContext;
+	asio::ip::tcp::socket _socket;
 
 	std::atomic<bool> _isConnected;
-	std::atomic<bool> _isStopped;
 
-	static NetworkMessage MakeMessage(const NetworkMessages::Payload& payload);
+	std::array<uint8_t, 6> _readMessageHeader;
+	std::vector<uint8_t> _readMessageData;
+
+	asio::io_service::strand _writeStrand;
+	bool _isWriting;
+	std::deque<std::vector<uint8_t>> _messagesToWrite;
+
+	PayloadQueue _payloadQueue;
 };

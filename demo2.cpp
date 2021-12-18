@@ -11,9 +11,9 @@
 
 #include "ConnectionManager.h"
 
-using namespace NetworkMessages;
-using asio::ip::tcp;
 
+using asio::ip::tcp;
+/*
 Payload blockUntilNextPayload(ConnectionManager& connectionManager)
 {
     bool hasPayload = false;
@@ -79,8 +79,9 @@ int alwaysReceiveData(ConnectionManager& connectionManager)
     std::cout << connectionManager.getName() <<  ": Stopped receiving\n";
     return 0;
 }
+*/
 
-
+/*
 int main()
 {
 
@@ -112,4 +113,4 @@ int main()
     std::cout << "Everything finished correctly";
 
     return 0;
-}
+}*/

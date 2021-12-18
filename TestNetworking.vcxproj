@@ -143,9 +143,11 @@
     <ClCompile Include="ConnectionManager.cpp" />
     <ClCompile Include="demo1.cpp" />
     <ClCompile Include="demo2.cpp" />
+    <ClCompile Include="demo3.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ConnectionManager.h" />
+    <ClInclude Include="NetworkMessage.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

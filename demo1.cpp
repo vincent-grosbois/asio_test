@@ -11,8 +11,9 @@
 
 #include "ConnectionManager.h"
 
-using namespace NetworkMessages;
+
 using asio::ip::tcp;
+/*
 
 int clientRead(ConnectionManager& connectionManager)
 {
@@ -102,7 +103,6 @@ int clientWrite(ConnectionManager& connectionManager)
     return 0;
 }
 
-/*
 
 int main()
 {

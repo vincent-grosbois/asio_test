@@ -12,377 +12,309 @@
 #include "ConnectionManager.h"
 
 
-using namespace NetworkMessages;
-using asio::ip::tcp;
+namespace {
+	std::vector<uint8_t> MakeMessage(const std::vector<uint8_t>& payload)
+	{
+		// header + size + payload + footer
+		const uint32_t totalSize = 2 + 4 + payload.size() + 2;
 
+		std::vector<uint8_t> message(totalSize);
 
-// Helper class to read a NetworkMessage from socket.
-// The difficulty lies in the fact that reading from socket may retrieve an incomplete NetworkMessage,
-// or several NeworkMessages who last message is incomplete.
-SocketReader::SocketReader(tcp::socket& socket) :
-	_bufferCurrentPos(0),
-	_socket(socket),
-	_shouldReadFromSocket(true)
-{
-	_socketBuffer.resize(_bufferSize);
+		// header magic values
+		message[0] = 0xFE;
+		message[1] = 0xEF;
+
+		// encode the size of the message
+		message[2 + 0] = (totalSize & 0xFF);
+		message[2 + 1] = ((totalSize >> 8) & 0xFF);
+		message[2 + 2] = ((totalSize >> 16) & 0xFF);
+		message[2 + 3] = ((totalSize >> 24) & 0xFF);
+
+		// copy payload starting at byte 6
+		std::copy(payload.begin(), payload.end(), message.begin() + 6);
+
+		// footer magic values
+		message[message.size() - 2] = 0xFA;
+		message[message.size() - 1] = 0xAF;
+
+		return message;
+	}
 }
 
-// Blocks until one full NetworkPayload is read, or the connection is reset
-Payload SocketReader::ReadNextNetworkPayload()
+
+
+PayloadQueue::PayloadQueue(std::string name, asio::io_context& io_context)
+	:
+	_name(name),
+	_io_context(io_context),
+	_queueStrand(io_context) // enforces non-concurrent access to _queue
+{ 
+}
+
+
+// tries once to get a payload if one is available
+bool PayloadQueue::getPayloadIfAny(std::vector<uint8_t>& payload)
 {
-	uint32_t currentPayloadPos = 0; // current location of where the payload is being copied
+	std::atomic<int> signal = -1;
 
-	uint32_t messageSize = -1; // size of the message : 8 + payload
-	uint32_t payloadSize = -1; // size of the relevant data
-
-	bool shouldReadHeader = true; // next read will have to parse the header
-
-	Payload payload;
-
-	while (true)
-	{
-
-		if (_shouldReadFromSocket) {
-			_bufferCurrentPos = 0;
-			_bytesAvailableInBuffer = _socket.read_some(asio::buffer(_socketBuffer));
-		}
-		else if (shouldReadHeader && _bytesAvailableInBuffer - _bufferCurrentPos < 6)
+	_queueStrand.post([this, &signal, &payload]() {
+		if (!_queue.empty())
 		{
-			// we still have data in our buffer but not enough to build the header
-			// in this case we pull from the socket enough data to have at least the rest of the header first
-
-			// remaining bytes in the buffer, so < 6
-			const int M = _bytesAvailableInBuffer - _bufferCurrentPos;
-
-			// copy them at the start of a new buffer
-			std::vector<uint8_t> newBuffer(_bufferSize);
-			std::copy(_socketBuffer.begin() + _bufferCurrentPos, _socketBuffer.begin() + _bufferCurrentPos + M, newBuffer.begin());
-
-			// remainder of _bufferSize bytes are pulled from socket
-			std::vector<uint8_t> socketBuffer2(_bufferSize - M);
-			int bufferSize2 = _socket.read_some(asio::buffer(socketBuffer2));
-
-			// fill the new buffer with socket data
-			std::copy(socketBuffer2.begin(), socketBuffer2.begin() + bufferSize2, newBuffer.begin() + M);
-			_bytesAvailableInBuffer = bufferSize2 + M;
-			_socketBuffer = std::move(newBuffer);
-			_bufferCurrentPos = 0;
-		}
-
-
-		if (shouldReadHeader) // read the message header
-		{
-			if (_bytesAvailableInBuffer - _bufferCurrentPos < 6) { // not enough data in buffer to read the header
-				assert(0); //TODO
-			}
-
-			// check header magic values
-			if (_socketBuffer[_bufferCurrentPos] != 0xFE || _socketBuffer[_bufferCurrentPos + 1] != 0xEF)
-			{
-				assert(0); //TODO handle
-			}
-
-			// read message size info
-			messageSize = _socketBuffer[_bufferCurrentPos + 2 + 0];
-			messageSize |= _socketBuffer[_bufferCurrentPos + 2 + 1] << 8;
-			messageSize |= _socketBuffer[_bufferCurrentPos + 2 + 2] << 16;
-			messageSize |= _socketBuffer[_bufferCurrentPos + 2 + 3] << 24;
-
-			payloadSize = messageSize - 8;
-			payload.resize(payloadSize, -1);
-			currentPayloadPos = 0;
-
-			_bufferCurrentPos += 6;
-
-			shouldReadHeader = false;
-		}
-
-		if (currentPayloadPos < payloadSize) {
-			// copy buffer data into payload
-			int nbBytesToCopy = std::min(_bytesAvailableInBuffer - _bufferCurrentPos, payloadSize - currentPayloadPos);
-			std::copy(
-				_socketBuffer.begin() + _bufferCurrentPos,
-				_socketBuffer.begin() + _bufferCurrentPos + nbBytesToCopy,
-				payload.begin() + currentPayloadPos);
-
-			currentPayloadPos += nbBytesToCopy;
-			_bufferCurrentPos += nbBytesToCopy;
-		}
-
-		// if we reached end of the payload, check footer magic values
-		if (currentPayloadPos == payloadSize && _bufferCurrentPos < _bytesAvailableInBuffer)
-		{
-			if (_socketBuffer[_bufferCurrentPos] != 0xFA)
-			{
-				assert(0); // TODO handle
-			}
-			++currentPayloadPos;
-			++_bufferCurrentPos;
-		}
-
-		if (currentPayloadPos == payloadSize + 1 && _bufferCurrentPos < _bytesAvailableInBuffer)
-		{
-			if (_socketBuffer[_bufferCurrentPos] != 0xAF)
-			{
-				assert(0); // TODO handle
-			}
-			++currentPayloadPos;
-			++_bufferCurrentPos;
-		}
-
-		// we copied the payload up to the end
-		if (currentPayloadPos == payloadSize + 2)
-		{
-			if (_bufferCurrentPos == _bytesAvailableInBuffer)
-			{
-				// exhausted current socket data : next read has to read from socket again
-				_shouldReadFromSocket = true;
-			}
-			else
-			{
-				// we still have data in the buffer : next read has to read what's left in the buffer
-				_shouldReadFromSocket = false;
-			}
-			return payload;
+			payload = std::move(_queue.front());
+			_queue.pop_front();
+			signal = 1;
 		}
 		else {
-			// exhausted current socket data : next read has to read from socket again
-			_shouldReadFromSocket = true;
+			signal = 0;
 		}
-	}
+		}
+	);
 
+	while (signal == -1) {}
+	return signal == 1;
 }
 
-ConnectionManager::ConnectionManager(const std::string& name) :
-	_name(name),
-	_isConnected(false),
-	_isStopped(false),
-	_socket(_io_context),
-	_socketReader(_socket)
+// tries to get a payload by blocking, otherwise abort after the timeout is elapsed
+bool PayloadQueue::getNextPayload(std::vector<uint8_t>& payload, int timeoutMilliseconds)
 {
+	std::atomic<int> signal = -1;
+	const std::chrono::steady_clock::time_point now = std::chrono::high_resolution_clock::now();
+	const std::chrono::steady_clock::time_point expirationTime = now + std::chrono::milliseconds(timeoutMilliseconds);
 
-}
+	_queueStrand.post([this, &signal, &payload, &expirationTime]() {
+		tryGetPayload(signal, payload, expirationTime);
+		}
+	);
 
-std::string ConnectionManager::getName() const
-{
-	return _name;
-}
-
-bool ConnectionManager::isConnected() const
-{
-	return _isConnected;
-}
-
-bool ConnectionManager::isStopped() const
-{
-	return _isStopped;
-}
-
-bool ConnectionManager::writeAllAndStop()
-{
-	if (_isStopped || !_isConnected)
+	while (signal == -1) {}
+	if (signal == 1)
 	{
-		return false;
+		std::cout << _name << "_payloadQueue : extracted message of size " << payload.size() + 8 << '\n';
+	}
+	else {
+		std::cout << _name << "_payloadQueue : extracting message timed out\n";
 	}
 
-	std::lock_guard<std::recursive_mutex> guard(_socketLock);
-	if (_isStopped)
-	{
-		return false;
-	}
-
-	std::lock_guard<std::recursive_mutex> writeLock(_outgoingMessagesToWriteLock);
-
-	// try to write everything to socket, but be careful that writeOutgoingMessageToSocket may also stop the socket if it fails
-	while (!_outgoingMessagesToWrite.empty() && _isConnected && !_isStopped)
-	{
-		writeOutgoingMessageToSocket();
-	}
-
-
-	_socket.close();
-	_isStopped = true;
-	_isConnected = false;
-	return true;
+	return signal == 1;
 }
 
-
-
-bool ConnectionManager::connectToServer(const std::string& ip, const std::string& port)
+void PayloadQueue::tryGetPayload(std::atomic<int>& signal, std::vector<uint8_t>& payload, std::chrono::steady_clock::time_point expirationTime)
 {
-	std::lock_guard<std::recursive_mutex> guard(_socketLock);
-
-	if (_isConnected || _isStopped) {
-		// we don't allow reconnection with same ConnectionManager instance
-		return false;
-	}
-
-	tcp::resolver resolver(_io_context);
-	tcp::resolver::results_type endpoints = resolver.resolve(ip, port);
-	asio::connect(_socket, endpoints);
-	_socket.set_option(asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO>{ 5 });
-
-	_isConnected = true;
-	_isStopped = false;
-	return true;
-}
-
-
-// blocks until a client joins in
-bool ConnectionManager::waitForClient(const int port)
-{
-	std::lock_guard<std::recursive_mutex> guard(_socketLock);
-
-	if (_isConnected || _isStopped) {
-		// we don't allow reconnection with same ConnectionManager instance
-		return false;
-	}
-
-	tcp::acceptor acceptor(_io_context, tcp::endpoint(tcp::v4(), port));
-	acceptor.accept(_socket);
-	_socket.set_option(asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO>{ 5 });
-
-	_isConnected = true;
-	_isStopped = false;
-	return true;
-}
-
-bool ConnectionManager::popIncomingPayload(Payload& message)
-{
-	std::lock_guard<std::recursive_mutex> guard(_incomingPayloadsToReadLock);
-	if (_incomingPayloadsToRead.empty())
+	if (!_queue.empty())
 	{
-		return false;
+		payload = std::move(_queue.front());
+		_queue.pop_front();
+		signal = 1; // signal that we found some value
 	}
-
-	message = std::move(_incomingPayloadsToRead[0]);
-	_incomingPayloadsToRead.pop_front();
-	return true;
-}
-
-void ConnectionManager::pushOutgoingPayload(const Payload& payload)
-{
-	NetworkMessage message = MakeMessage(payload);
-	std::lock_guard<std::recursive_mutex> guard(_outgoingMessagesToWriteLock);
-	_outgoingMessagesToWrite.emplace_back(std::move(message));
-}
-
-bool ConnectionManager::writeOutgoingMessageToSocket()
-{
-	if (!_isConnected || _isStopped)
-	{
-		return false;
-	}
-
-	std::lock_guard<std::recursive_mutex> queueGuard(_outgoingMessagesToWriteLock);
-
-	if (_outgoingMessagesToWrite.empty())
-	{
-		return false;
-	}
-
-	std::lock_guard<std::recursive_mutex> socketGuard(_socketLock);
-	if (_isStopped)
-	{
-		return false;
-	}
-
-	const size_t messageSize = _outgoingMessagesToWrite[0].size();
-
-	try {
-		asio::write(_socket, asio::buffer(_outgoingMessagesToWrite[0]));
-		_outgoingMessagesToWrite.pop_front();
-	}
-	catch (asio::system_error error)
-	{
-		if (error.code() == asio::error::eof)
+	else {
+		const std::chrono::steady_clock::time_point now = std::chrono::high_resolution_clock::now();
+		if (now < expirationTime)
 		{
-			_isConnected = false;
-			_isStopped = true;
-			return false;
+			// Post a task that will retry. Potentially another task is already pending that will add an item.
+			_queueStrand.post([this, &signal, &payload, expirationTime]() { tryGetPayload(signal, payload, expirationTime); });
 		}
 		else
 		{
-			// other errors are unexpected: rethrow
-			throw error;
+			signal = 0; // no time left, signal that we abort
 		}
 	}
-
-	std::cout << _name << ": sent " << messageSize << " bytes over socket" << std::endl;
-
-	return true;
 }
 
-bool ConnectionManager::waitForIncomingMessageFromSocket()
+
+void PayloadQueue::addPayload(std::vector<uint8_t>&& payload)
 {
-	if (!_isConnected || _isStopped)
+	_queueStrand.post([this, payload_ = std::move(payload)]() mutable {
+		// crop the footer
+		payload_.resize(payload_.size() - 2);
+		std::cout << _name << "_payloadQueue : pushed to queue message of size " << payload_.size() + 8 << '\n';
+		_queue.emplace_back(std::move(payload_));
+	});
+}
+
+
+NetworkConnection::NetworkConnection(
+	const std::string& name,
+	asio::io_context& io_context_for_socket,
+	asio::io_context& io_context_for_payload_queue)
+	:
+	_name(name),
+	_ioContext(io_context_for_socket),
+	_writeStrand(io_context_for_socket),
+	_socket(io_context_for_socket),
+	_payloadQueue(name, io_context_for_payload_queue),
+	_readMessageHeader(),
+	_isConnected(false),
+	_isWriting(false)
+{
+}
+
+bool NetworkConnection::connectSync(const asio::ip::tcp::endpoint endpoint)
+{
+	if (_isConnected)
 	{
 		return false;
 	}
 
-	Payload payload;
+	asio::error_code ec;
+	_socket.connect(endpoint, ec);
 
+	if (ec)
 	{
-		std::lock_guard<std::recursive_mutex> socketGuard(_socketLock);
-		if (_isStopped)
-		{
-			return false;
-		}
-		try {
-			payload = _socketReader.ReadNextNetworkPayload();
-		}
-		catch (asio::system_error error)
-		{
-			if (error.code() == asio::error::eof)
-			{
-				_isConnected = false;
-				_isStopped = true;
-				//std::cout << _name << ": deconnected" << std::endl;
-				return false; // reach end of file of socket : deconnected
-			}
-			if (error.code() == asio::error::timed_out)
-			{
-				return false; // read timed out : probably nothing to read
-			}
-			else
-			{
-				// other errors are unexpected: rethrow
-				throw error;
-			}
-		}
+		std::cout << _name << " : Connection failed with error " << ec.message() << "\n";
+		return false;
 	}
 
-	std::cout << _name << ": received message with payload " << payload.size() << " bytes" << std::endl;
+	_isConnected = true;
+	_ioContext.post([this]() { do_read_header(); });
 
-	std::lock_guard<std::recursive_mutex> guard(_incomingPayloadsToReadLock);
-	_incomingPayloadsToRead.emplace_back(std::move(payload));
 	return true;
 }
 
-
-ConnectionManager::NetworkMessage ConnectionManager::MakeMessage(const Payload& payload)
+bool NetworkConnection::acceptConnectionSync(const int port)
 {
-	// header + size + payload + footer
-	const uint32_t totalSize = 2 + 4 + payload.size() + 2;
+	if (_isConnected)
+	{
+		return false;
+	}
 
-	std::vector<uint8_t> message(totalSize);
+	asio::ip::tcp::acceptor acceptor(_ioContext, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port));
+	asio::error_code ec;
+	acceptor.accept(_socket, ec);
 
-	// header magic values
-	message[0] = 0xFE;
-	message[1] = 0xEF;
+	if (ec)
+	{
+		std::cout << _name << " : Acceptor failed with error " << ec.message() << "\n";
+		return false;
+	}
 
-	// encode the size of the message
-	message[2 + 0] = (totalSize & 0xFF);
-	message[2 + 1] = ((totalSize >> 8) & 0xFF);
-	message[2 + 2] = ((totalSize >> 16) & 0xFF);
-	message[2 + 3] = ((totalSize >> 24) & 0xFF);
+	_isConnected = true;
+	_ioContext.post([this]() { do_read_header(); });
 
-	// copy payload starting at byte 6
-	std::copy(payload.begin(), payload.end(), message.begin() + 6);
+	return true;
+}
 
-	// footer magic values
-	message[message.size() - 2] = 0xFA;
-	message[message.size() - 1] = 0xAF;
+void NetworkConnection::close()
+{
+	asio::post(_ioContext, [this]() {
+		_socket.close();
+		_isConnected = false;
+		});
+}
 
-	return message;
+
+// asynchronously sends a payload to the endpoint. This is thread-safe.
+bool NetworkConnection::write(std::vector<uint8_t>&& payload) {
+
+	if (!_isConnected)
+	{
+		return false;
+	}
+
+	std::vector<uint8_t> message = MakeMessage(payload);
+	_writeStrand.post(
+		[this, message_ = std::move(message)]() mutable {
+		_messagesToWrite.emplace_back(std::move(message_));
+		do_write();
+	});
+
+	return true;
+}
+
+bool NetworkConnection::getPayloadIfAny(std::vector<uint8_t>& payload)
+{
+	return _payloadQueue.getPayloadIfAny(payload);
+}
+
+bool NetworkConnection::getNextPayload(std::vector<uint8_t>& payload, int timeoutMilliseconds /*= 10*/)
+{
+	return _payloadQueue.getNextPayload(payload, timeoutMilliseconds);
+}
+
+
+void NetworkConnection::do_read_header()
+{
+	asio::async_read(_socket,
+		asio::buffer(_readMessageHeader),
+		[this](asio::error_code ec, std::size_t length)
+		{
+			if (!ec)
+			{
+				if (_readMessageHeader[0] != 0xFE || _readMessageHeader[1] != 0xEF) // check header magic values
+				{
+					std::cout << _name << " : Received invalid header, disconnecting\n";
+					close();
+				}
+
+				// read message size info
+				int messageSize = _readMessageHeader[2];
+				messageSize |= _readMessageHeader[3] << 8;
+				messageSize |= _readMessageHeader[4] << 16;
+				messageSize |= _readMessageHeader[5] << 24;
+
+				const int payloadSize = messageSize - 8;
+				do_read_body(payloadSize);
+			}
+			else
+			{
+				std::cout << _name << " : Received error code in do_read_header " << ec.message() << "\n";
+				close();
+			}
+		});
+}
+
+void NetworkConnection::do_read_body(const int payloadSize)
+{
+	// resize to have enough data for payload + footer
+	_readMessageData.resize(payloadSize + 2);
+
+	asio::async_read(_socket,
+		asio::buffer(_readMessageData),
+		[this, payloadSize](asio::error_code ec, std::size_t length)
+		{
+			if (!ec)
+			{
+				if (_readMessageData[payloadSize] != 0xFA || _readMessageData[payloadSize + 1] != 0xAF) // check footer magic values
+				{
+					std::cout << _name << " : Received invalid footer, disconnecting\n";
+					close();
+				}
+
+				std::cout << _name << " : Read message of size " << payloadSize + 8 << "\n";
+				_payloadQueue.addPayload(std::move(_readMessageData));
+				do_read_header();
+			}
+			else
+			{
+				std::cout << _name << " : Received error code in do_read_body " << ec.message() << "\n";
+				close();
+			}
+		});
+}
+
+void NetworkConnection::do_write()
+{
+	if (_messagesToWrite.empty() || _isWriting)
+	{
+		return;
+	}
+
+	_isWriting = true;
+
+	asio::async_write(_socket, asio::buffer(_messagesToWrite.front()), _writeStrand.wrap(
+		[this](asio::error_code ec, std::size_t length)
+		{
+			if (!ec)
+			{
+				std::cout << _name << " : Wrote " << length << " bytes \n";
+				_isWriting = false;
+				_messagesToWrite.pop_front();
+				do_write();
+			}
+			else
+			{
+				std::cout << _name << " : Received error code in async_write " << ec.message() << "\n";
+				close();
+			}
+		}
+	));
 }
