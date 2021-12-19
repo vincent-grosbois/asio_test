@@ -60,7 +60,7 @@ int server()
 		std::cout << "Incorrect message received from client\n";
 	}
 
-	server.close();
+	server.closeAfterAllPendingWrites();
 
 	work.reset();
 	work2.reset();
@@ -114,7 +114,7 @@ int client()
 
 	//client.getNextPayload(msg);
 
-	client.close();
+	client.closeAfterAllPendingWrites();
 	work.reset();
 	work2.reset();
 

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <deque>
 #include <cassert>
+#include <tuple>
 
 #include "include/asio.hpp"
 
@@ -57,6 +58,7 @@ public:
 	bool acceptConnectionSync(const int port);
 
 	void close();
+	void closeAfterAllPendingWrites();
 
 	// asynchronously sends a payload to the endpoint. This is thread-safe.
 	bool write(std::vector<uint8_t>&& payload);
@@ -84,7 +86,10 @@ private:
 
 	asio::io_service::strand _writeStrand;
 	bool _isWriting;
-	std::deque<std::vector<uint8_t>> _messagesToWrite;
+
+	typedef std::pair<std::array<uint8_t, 6>, std::vector<uint8_t>> MessageData;
+	std::deque<MessageData> _messagesToWrite;
+	const std::array<uint8_t, 2> _messageFooter = { 0xFA, 0xAF };
 
 	PayloadQueue _payloadQueue;
 };

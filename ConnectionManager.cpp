@@ -13,34 +13,23 @@
 
 
 namespace {
-	std::vector<uint8_t> MakeMessage(const std::vector<uint8_t>& payload)
+
+	std::array<uint8_t, 6> MakeHeader(const std::vector<uint8_t>& payload)
 	{
-		// header + size + payload + footer
-		const uint32_t totalSize = 2 + 4 + payload.size() + 2;
-
-		std::vector<uint8_t> message(totalSize);
-
 		// header magic values
-		message[0] = 0xFE;
-		message[1] = 0xEF;
+		std::array<uint8_t, 6> header = { 0xFE, 0xEF }; 
 
 		// encode the size of the message
-		message[2 + 0] = (totalSize & 0xFF);
-		message[2 + 1] = ((totalSize >> 8) & 0xFF);
-		message[2 + 2] = ((totalSize >> 16) & 0xFF);
-		message[2 + 3] = ((totalSize >> 24) & 0xFF);
+		const uint32_t totalSize = 2 + 4 + payload.size() + 2; // header + size + payload + footer
+		header[2] = (totalSize & 0xFF);
+		header[3] = ((totalSize >> 8) & 0xFF);
+		header[4] = ((totalSize >> 16) & 0xFF);
+		header[5] = ((totalSize >> 24) & 0xFF);
 
-		// copy payload starting at byte 6
-		std::copy(payload.begin(), payload.end(), message.begin() + 6);
-
-		// footer magic values
-		message[message.size() - 2] = 0xFA;
-		message[message.size() - 1] = 0xAF;
-
-		return message;
+		return header;
 	}
-}
 
+}
 
 
 PayloadQueue::PayloadQueue(std::string name, asio::io_context& io_context)
@@ -201,6 +190,21 @@ void NetworkConnection::close()
 		});
 }
 
+void NetworkConnection::closeAfterAllPendingWrites()
+{
+	asio::post(_writeStrand, [this]() {
+
+		if (_isConnected && (!_messagesToWrite.empty() || _isWriting))
+		{
+			closeAfterAllPendingWrites();
+		}
+		else {
+			_socket.close();
+			_isConnected = false;
+		}
+		});
+}
+
 
 // asynchronously sends a payload to the endpoint. This is thread-safe.
 bool NetworkConnection::write(std::vector<uint8_t>&& payload) {
@@ -210,10 +214,10 @@ bool NetworkConnection::write(std::vector<uint8_t>&& payload) {
 		return false;
 	}
 
-	std::vector<uint8_t> message = MakeMessage(payload);
 	_writeStrand.post(
-		[this, message_ = std::move(message)]() mutable {
-		_messagesToWrite.emplace_back(std::move(message_));
+		[this, payload_ = std::move(payload)]() mutable {
+		MessageData messageData(MakeHeader(payload_), std::move(payload_));
+		_messagesToWrite.emplace_back(std::move(messageData));
 		do_write();
 	});
 
@@ -300,13 +304,17 @@ void NetworkConnection::do_write()
 
 	_isWriting = true;
 
-	asio::async_write(_socket, asio::buffer(_messagesToWrite.front()), _writeStrand.wrap(
+	const MessageData& firstMessage = _messagesToWrite.front();
+
+	std::array<asio::const_buffer, 3> sequence{ asio::buffer(firstMessage.first), asio::buffer(firstMessage.second), asio::buffer(_messageFooter) };
+
+	asio::async_write(_socket, sequence, _writeStrand.wrap(
 		[this](asio::error_code ec, std::size_t length)
 		{
+			_isWriting = false;
 			if (!ec)
 			{
 				std::cout << _name << " : Wrote " << length << " bytes \n";
-				_isWriting = false;
 				_messagesToWrite.pop_front();
 				do_write();
 			}
